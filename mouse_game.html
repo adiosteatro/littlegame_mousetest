@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>鼠鼠模擬器 v4.0：變異危機</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1e272e; font-family: 'Segoe UI', sans-serif; user-select: none; -webkit-user-select: none; }
+        #ui { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; justify-content: space-between; pointer-events: none; z-index: 100; }
+        #stats { background: rgba(255,255,255,0.9); padding: 10px 20px; border-radius: 20px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); font-weight: bold; color: #2d3436; font-size: 14px; white-space: nowrap; }
+        #tools { pointer-events: auto; display: flex; gap: 8px; background: rgba(0,0,0,0.6); padding: 10px; border-radius: 50px; backdrop-filter: blur(5px); flex-wrap: wrap; justify-content: center; }
+        button { width: 50px; height: 50px; font-size: 22px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; transition: transform 0.1s; display: flex; align-items: center; justify-content: center; outline: none; }
+        button:active { transform: scale(0.9); }
+        #hint { position: absolute; bottom: 80px; left: 50%; transform: translateX(-50%); color: #fff; font-size: 1.2em; text-shadow: 0 2px 4px #000; pointer-events: none; white-space: nowrap; text-align: center; width: 100%; }
+        #modal { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.9); padding: 30px; border-radius: 15px; color: #fff; text-align: center; display: none; border: 1px solid #fff; box-shadow: 0 0 50px rgba(0,0,0,0.8); z-index: 200; min-width: 280px; }
+        .win { color: #55efc4; } .lose { color: #ff7675; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div id="stats">
+            <span id="timer" style="color:#0984e3">⏱️ 03:00</span> | 
+            <span>🐭 <span id="count">3</span>/200</span> | 
+            <span style="color:#d63031">🏆 <span id="score">0</span></span>
+        </div>
+        <div style="position:fixed; bottom:20px; left:0; width:100%; display:flex; justify-content:center; pointer-events:none;">
+            <div id="tools"></div>
+        </div>
+    </div>
+    <div id="hint">工具: 🧀 撒起司 (點擊地面)</div>
+    
+    <div id="modal">
+        <h2 id="m-title"></h2>
+        <p id="m-score" style="font-size:1.2em; line-height: 1.5;"></p>
+        <button onclick="initGame()" style="padding:10px 30px; font-size:1.2em; background:#0984e3; color:#fff; border:none; border-radius:30px; margin-top:20px;">再玩一次</button>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const toolsDiv = document.getElementById('tools');
+    const hintDiv = document.getElementById('hint');
+    const timerSpan = document.getElementById('timer');
+    const countSpan = document.getElementById('count');
+    const scoreSpan = document.getElementById('score');
+    const modal = document.getElementById('modal');
+    const mTitle = document.getElementById('m-title');
+    const mScore = document.getElementById('m-score');
+
+    let width, height;
+    function resize(){ width=canvas.width=window.innerWidth; height=canvas.height=window.innerHeight; }
+    window.addEventListener('resize', resize); resize();
+
+    // === 音效系統 ===
+    let audioCtx;
+    const SoundFX = {
+        init: () => { if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)(); if(audioCtx.state==='suspended')audioCtx.resume(); },
+        playTone: (f,t,d,v=0.1) => { try{ let o=audioCtx.createOscillator(),g=audioCtx.createGain(); o.type=t;o.frequency.setValueAtTime(f,audioCtx.currentTime);g.gain.setValueAtTime(v,audioCtx.currentTime);g.gain.exponentialRampToValueAtTime(0.01,audioCtx.currentTime+d);o.connect(g);g.connect(audioCtx.destination);o.start();o.stop(audioCtx.currentTime+d); }catch(e){} },
+        playScore: ()=>SoundFX.playTone(1200,'sine',0.3,0.1), 
+        playMating: ()=>SoundFX.playTone(600,'sine',0.5,0.1), 
+        playDuel: ()=>SoundFX.playTone(150,'sawtooth',0.1,0.2), 
+        playSplash: ()=>SoundFX.playTone(400,'triangle',0.2,0.1),
+        playMutate: ()=>SoundFX.playTone(200,'square',0.8,0.1), // 變異音效
+        playExplosion: ()=>{ try{ let b=audioCtx.createBuffer(1,audioCtx.sampleRate*0.5,audioCtx.sampleRate),d=b.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;let n=audioCtx.createBufferSource();n.buffer=b;let g=audioCtx.createGain();g.gain.setValueAtTime(0.5,audioCtx.currentTime);g.gain.exponentialRampToValueAtTime(0.01,audioCtx.currentTime+0.5);n.connect(g);g.connect(audioCtx.destination);n.start(); }catch(e){} }
+    };
+    canvas.addEventListener('mousedown', ()=>SoundFX.init(), {once:true});
+    canvas.addEventListener('touchstart', ()=>SoundFX.init(), {once:true});
+
+    // === 工具定義 ===
+    let currentTool = 'food';
+    const tools = [
+        {id:'food',e:'🧀',h:'撒起司 (大量)',c:'#fdcb6e'}, 
+        {id:'lure',e:'💗',h:'誘導劑 (吸怪)',c:'#e84393'}, 
+        {id:'smoke',e:'💨',h:'毒煙霧 (導致變異)',c:'#55efc4'},
+        {id:'wall',e:'🧱',h:'蓋牆 (阻擋)',c:'#636e72'}, 
+        {id:'bomb',e:'💣',h:'炸藥 (破牆/殺鼠)',c:'#ff7675'}, 
+        {id:'gender',e:'⚧️',h:'變性液 (範圍)',c:'#a29bfe'},
+        {id:'reset',e:'🔄',h:'重置遊戲',c:'#dfe6e9'}
+    ];
+    
+    tools.forEach(t => {
+        let b = document.createElement('button'); b.textContent=t.e; b.style.background=t.id==='food'?t.c:'#eee';
+        if(t.id==='food') { b.style.border='2px solid #fff'; b.style.color='#fff'; }
+        
+        // 點擊事件
+        b.onmousedown = (e) => { e.stopPropagation(); selectTool(t, b); };
+        b.ontouchstart = (e) => { e.stopPropagation(); selectTool(t, b); };
+
+        toolsDiv.appendChild(b);
+    });
+
+    function selectTool(t, btnElement) {
+        if(t.id==='reset') { initGame(); return; }
+        currentTool=t.id; hintDiv.textContent=`工具: ${t.e} ${t.h}`;
+        Array.from(toolsDiv.children).forEach(c=> {c.style.background='#eee';c.style.color='#000';c.style.border='2px solid transparent';});
+        btnElement.style.background=t.c; btnElement.style.color='#fff'; btnElement.style.border='2px solid #fff';
+    }
+
+    // === 遊戲核心 ===
+    let mice=[], foods=[], walls=[], particles=[], smokes=[], lures=[];
+    let gameOver=false, totalAdultScore=0, frame=0, startTime, timeLimit=180, loopId;
+
+    class Mouse {
+        constructor(x,y,isAdult, isMutant=false){
+            this.x=x;this.y=y;this.gender=Math.random()>0.5?'M':'F';
+            this.age=isAdult?600:0; 
+            
+            // 變異邏輯
+            this.isMutant = isMutant || (Math.random() < 0.05); // 5% 自然變異
+            if(this.isMutant) SoundFX.playMutate();
+
+            this.size = isAdult ? (this.isMutant?18:12) : 6; // 變異種比較大
+            this.vx=(Math.random()-0.5)*2; this.vy=(Math.random()-0.5)*2;
+            this.hunger=100; this.matingTarget=null; this.matingTimer=0; this.cooldown=0;
+            this.dead=false; this.infected=false; this.deathTimer=600; this.scored=isAdult;
+        }
+        draw(){
+            ctx.save(); ctx.translate(this.x,this.y);
+            // 陰影
+            ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(0, this.size*0.8, this.size*0.8, this.size*0.3, 0, 0, Math.PI*2); ctx.fill();
+            
+            // 顏色邏輯
+            let cMain, cDark;
+            if (this.isMutant) { cMain='#a29bfe'; cDark='#6c5ce7'; } // 變異種：紫色
+            else if(this.infected){ cMain='#55efc4'; cDark='#00b894'; } // 中毒：綠色
+            else if(this.age<500){ cMain='#dfe6e9'; cDark='#b2bec3'; } // 幼鼠：白色
+            else if(this.gender==='M'){ cMain='#74b9ff'; cDark='#0984e3'; } // 公：藍色
+            else{ cMain='#fab1a0'; cDark='#e17055'; } // 母：粉色
+
+            // 變異光環
+            if(this.isMutant) {
+                ctx.shadowBlur = 15; ctx.shadowColor = '#a29bfe';
+            }
+
+            let g=ctx.createRadialGradient(-3,-3,2,0,0,this.size);g.addColorStop(0,cMain);g.addColorStop(1,cDark);
+            ctx.fillStyle=g; ctx.beginPath(); ctx.arc(0,0,this.size,0,Math.PI*2); ctx.fill();
+            ctx.shadowBlur = 0; // Reset shadow
+
+            // 高光與五官
+            ctx.fillStyle='rgba(255,255,255,0.4)';ctx.beginPath();ctx.ellipse(-this.size*0.4,-this.size*0.4,this.size*0.3,this.size*0.2,Math.PI/4,0,Math.PI*2);ctx.fill();
+            ctx.fillStyle=cDark;ctx.beginPath();ctx.arc(-this.size*0.7,-this.size*0.6,this.size*0.4,0,Math.PI*2);ctx.fill();ctx.beginPath();ctx.arc(this.size*0.7,-this.size*0.6,this.size*0.4,0,Math.PI*2);ctx.fill();
+            ctx.fillStyle='#2d3436';ctx.beginPath();ctx.arc(-3,0,1.5,0,Math.PI*2);ctx.fill();ctx.beginPath();ctx.arc(3,0,1.5,0,Math.PI*2);ctx.fill();
+            
+            // 鼻子
+            ctx.fillStyle=this.infected?'#00b894':'#ff7675';ctx.beginPath();ctx.arc(0,4,this.isMutant?3:2,0,Math.PI*2);ctx.fill();
+
+            // 狀態特效
+            if(this.matingTimer>0){
+                ctx.fillStyle='#ff0000';ctx.font='14px Arial';ctx.fillText('❤️',-7,-this.size-5);
+                ctx.fillStyle='#55efc4';ctx.fillRect(-10,-this.size-15,20*(this.matingTimer/300),3);
+            }
+            if(this.infected && !this.isMutant && frame%60===0 && Math.random()<0.3) { 
+                // 變異種免疫咳嗽
+                ctx.fillStyle='#fff';ctx.font='10px Arial';ctx.fillText('咳',8,-8);
+            }
+            ctx.restore();
+        }
+        update(){
+            // 狀態更新
+            if(this.infected) {
+                if(this.isMutant) {
+                    // 變異種免疫毒死，但會發光
+                    this.infected = false; 
+                } else {
+                    this.deathTimer--; 
+                    if(this.deathTimer<=0) {
+                        // 毒死前有極低機率突變
+                        if(Math.random() < 0.05) { this.isMutant = true; this.infected = false; this.size = 18; SoundFX.playMutate(); }
+                        else return false;
+                    }
+                }
+            } else {
+                for(let s of smokes) if(Math.hypot(this.x-s.x,this.y-s.y)<s.r+this.size){this.infected=true;break;}
+            }
+
+            if(this.cooldown>0)this.cooldown--;
+
+            // 飢餓
+            let hungerRate = this.isMutant ? 0.04 : 0.08; // 變異種餓得慢
+            if(this.age<500){
+                this.hunger-=hungerRate; if(this.hunger<=0) return false;
+                if(this.hunger>90){ this.age+=this.isMutant?5:3; this.size=6+(this.age/500)*(this.isMutant?12:6); }
+            } else {
+                this.hunger=100;
+                if(!this.scored){
+                    totalAdultScore++; scoreSpan.textContent=totalAdultScore; SoundFX.playScore(); this.scored=true;
+                    for(let k=0;k<10;k++)particles.push({x:this.x,y:this.y,vx:(Math.random()-0.5)*5,vy:(Math.random()-0.5)*5,life:1,c:'#ffd700'});
+                }
+            }
+
+            // 移動 (含誘導)
+            let lured=false; 
+            if(lures.length>0){
+                let n=lures.reduce((p,c)=>Math.hypot(c.x-this.x,c.y-this.y)<Math.hypot(p.x-this.x,p.y-this.y)?c:p);
+                if(Math.hypot(n.x-this.x,n.y-this.y)<n.r){
+                    let a=Math.atan2(n.y-this.y,n.x-this.x);
+                    this.vx+=Math.cos(a)*0.2; this.vy+=Math.sin(a)*0.2; lured=true;
+                }
+            }
+
+            // 物理運動
+            this.x+=this.vx; this.y+=this.vy;
+            if(this.x<this.size||this.x>width-this.size)this.vx*=-1;
+            if(this.y<this.size||this.y>height-this.size)this.vy*=-1;
+            for(let w of walls){
+                let dx=this.x-w.x, dy=this.y-w.y;
+                if(Math.abs(dx)<w.w/2+this.size && Math.abs(dy)<w.h/2+this.size){
+                    if(Math.abs(dx)>Math.abs(dy))this.vx*=-1; else this.vy*=-1;
+                    this.x+=this.vx*2; this.y+=this.vy*2;
+                }
+            }
+
+            // 速度控制
+            if(lured){this.vx*=0.9;this.vy*=0.9;}
+            else if(Math.random()<0.05){
+                this.vx+=(Math.random()-0.5); this.vy+=(Math.random()-0.5);
+                let speedLimit = this.isMutant ? 3 : 2; // 變異種比較快
+                let s=Math.hypot(this.vx,this.vy); if(s>speedLimit){this.vx=(this.vx/s)*speedLimit;this.vy=(this.vy/s)*speedLimit;}
+            }
+            
+            // 決鬥 (變異種必勝)
+            if(this.gender==='M'&&this.age>=500&&!this.infected&&!this.dead){
+                for(let o of mice)if(o.gender==='F'&&o.age>=500&&!o.dead&&!o.infected){
+                    if(Math.hypot(this.x-o.x,this.y-o.y)<80&&o.matingTarget&&o.matingTarget!==this&&o.matingTarget.gender==='M'){
+                        if(Math.hypot(this.x-o.matingTarget.x,this.y-o.matingTarget.y)<30) this.duel(o.matingTarget,o);
+                    }
+                }
+            }
+
+            // 求偶
+            if(!this.infected && this.age>=500 && !this.matingTarget && !this.dead && this.cooldown<=0){
+                for(let o of mice)if(o!==this&&o.age>=500&&o.gender!==this.gender&&!o.matingTarget&&!o.infected&&!o.dead&&o.cooldown<=0){
+                    if(Math.hypot(this.x-o.x,this.y-o.y)<this.size+o.size+5){this.matingTarget=o;o.matingTarget=this;this.vx=0;this.vy=0;o.vx=0;o.vy=0;break;}
+                }
+            }
+            if(this.matingTarget){
+                if(!mice.includes(this.matingTarget)||this.matingTarget.dead||this.matingTarget.infected){this.matingTarget=null;this.matingTimer=0;}
+                else{this.matingTimer++;if(this.matingTimer>=(this.isMutant?150:300))this.birth(); return!this.dead;} // 變異種繁殖快
+            }
+            return !this.dead;
+        }
+
+        duel(rival, female){
+            SoundFX.playDuel();
+            for(let k=0;k<5;k++)particles.push({x:(this.x+rival.x)/2,y:(this.y+rival.y)/2,vx:(Math.random()-0.5)*10,vy:(Math.random()-0.5)*10,life:0.5,c:'#f1c40f'});
+            
+            // 變異種優勢
+            let myWinChance = 0.5;
+            if (this.isMutant && !rival.isMutant) myWinChance = 0.9;
+            if (!this.isMutant && rival.isMutant) myWinChance = 0.1;
+
+            if(Math.random() < myWinChance){
+                rival.dead=true; particles.push({x:rival.x,y:rival.y,vx:0,vy:0,life:1,c:'#d63031'});
+                female.matingTarget=this; this.matingTarget=female; female.matingTimer=0; this.matingTimer=0; this.vx=0;this.vy=0;
+            }else{
+                this.dead=true; particles.push({x:this.x,y:this.y,vx:0,vy:0,life:1,c:'#d63031'});
+            }
+        }
+
+        birth(){
+            if(this.gender==='F'){
+                let n=Math.floor(Math.random()*12)+1;
+                // 父母若是變異種，孩子高機率變異
+                let parentMutant = this.isMutant || (this.matingTarget && this.matingTarget.isMutant);
+                
+                for(let i=0;i<n;i++) mice.push(new Mouse(this.x,this.y,false, parentMutant ? (Math.random()<0.5) : false));
+                
+                for(let i=0;i<15;i++)particles.push({x:this.x,y:this.y,vx:(Math.random()-0.5)*5,vy:(Math.random()-0.5)*5,life:1,c:'#fff'});
+                SoundFX.playMating(); this.dead=true;
+                if(this.matingTarget){this.matingTarget.matingTarget=null;this.matingTarget.matingTimer=0;this.matingTarget.cooldown=300;}
+            }
+        }
+    }
+    class Wall{constructor(x,y){this.x=x;this.y=y;this.w=40;this.h=40;}draw(){ctx.fillStyle='#b2bec3';ctx.fillRect(this.x-20,this.y-20,40,40);ctx.fillStyle='#636e72';ctx.fillRect(this.x-20,this.y+15,40,5);ctx.strokeStyle='#2d3436';ctx.strokeRect(this.x-20,this.y-20,40,40);}}
+
+    function initGame(){
+        mice=[];foods=[];walls=[];particles=[];smokes=[];lures=[];gameOver=false;totalAdultScore=0;frame=0;startTime=Date.now();
+        scoreSpan.textContent=0; modal.style.display='none';
+        for(let i=0;i<3;i++)mice.push(new Mouse(width/2+(Math.random()-0.5)*50,height/2+(Math.random()-0.5)*50,false));
+        if(loopId) cancelAnimationFrame(loopId); loop();
+    }
+
+    function showGameOver(t,w){
+        gameOver=true; mTitle.textContent=t; mTitle.className=w?'win':'lose';
+        mScore.innerHTML=`🏆 最終累計成鼠: ${totalAdultScore}<br><span style="font-size:0.8em;color:#aaa">存活: ${mice.length}隻</span>`;
+        modal.style.display='block';
+    }
+
+    function loop(){
+        if(gameOver)return; frame++;
+        let el=Math.floor((Date.now()-startTime)/1000), rem=timeLimit-el; if(rem<0)rem=0;
+        let m=Math.floor(rem/60), s=rem%60; timerSpan.textContent=`⏱️ ${m}:${s<10?'0'+s:s}`;
+        if(rem<=0){showGameOver("⏰ 生存成功！",true);return;}
+
+        ctx.fillStyle='#1e272e';ctx.fillRect(0,0,width,height);
+        walls.forEach(w=>w.draw());
+        lures=lures.filter(l=>{l.life--;l.draw();return l.life>0;});
+        smokes=smokes.filter(s=>{s.life--;s.draw();return s.life>0;});
+        foods.forEach(f=>{ctx.fillStyle='#fdcb6e';ctx.beginPath();ctx.moveTo(f.x,f.y-5);ctx.lineTo(f.x+5,f.y+5);ctx.lineTo(f.x-5,f.y+5);ctx.fill();});
+        particles=particles.filter(p=>p.life>0);particles.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.life-=0.05;ctx.globalAlpha=p.life;ctx.fillStyle=p.c;ctx.beginPath();ctx.arc(p.x,p.y,4,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;});
+        
+        for(let i=mice.length-1;i>=0;i--){
+            let mo=mice[i];
+            if(mo.hunger<90){let fi=foods.findIndex(f=>Math.hypot(f.x-mo.x,f.y-mo.y)<mo.size+20);if(fi!==-1){foods.splice(fi,1);mo.hunger=100;}}
+            if(!mo.update()){if(!mo.dead)particles.push({x:mo.x,y:mo.y,vx:0,vy:0,life:1,c:'#636e72'});mice.splice(i,1);}else{mo.draw();}
+        }
+        countSpan.textContent=mice.length;
+        if(frame>200){if(mice.length>=200)showGameOver("🛑 鼠患失控！",false);else if(mice.length<=1)showGameOver("⚰️ 族群滅絕！",false);}
+        loopId=requestAnimationFrame(loop);
+    }
+
+    // 操作控制 (綁定在 Canvas)
+    function handleInput(e) {
+        e.preventDefault();
+        // 取得點擊座標 (相對於 Canvas)
+        const rect = canvas.getBoundingClientRect();
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+
+        // 通用特效 (點擊回饋)
+        for(let k=0;k<3;k++)particles.push({x:x,y:y,vx:(Math.random()-0.5)*3,vy:(Math.random()-0.5)*3,life:0.5,c:'rgba(255,255,255,0.5)'});
+
+        if(currentTool==='food'){
+            SoundFX.playSplash();
+            let n=Math.floor(Math.random()*4)+7;
+            for(let i=0;i<n;i++)foods.push({x:x+(Math.random()-0.5)*40,y:y+(Math.random()-0.5)*40});
+        }
+        else if(currentTool==='lure'){
+             SoundFX.playSplash(); lures.push(new Lure(x,y));
+        }
+        else if(currentTool==='wall'){
+             walls.push(new Wall(x,y));
+        }
+        else if(currentTool==='smoke'){
+             SoundFX.playSplash(); smokes.push(new Smoke(x,y));
+        }
+        else if(currentTool==='bomb'){
+            SoundFX.playExplosion();
+            for(let k=0;k<20;k++)particles.push({x:x,y:y,vx:(Math.random()-0.5)*10,vy:(Math.random()-0.5)*10,life:1.5,c:'#ff7675'});
+            
+            // 炸牆
+            for(let i=walls.length-1;i>=0;i--)if(Math.hypot(walls[i].x-x,walls[i].y-y)<60){walls.splice(i,1);for(let k=0;k<5;k++)particles.push({x:x,y:y,vx:(Math.random()-0.5)*5,vy:(Math.random()-0.5)*5,life:1,c:'#b2bec3'});}
+            
+            // 炸鼠 (增加半徑)
+            let ts=mice.map((m,idx)=>({idx,d:Math.hypot(m.x-x,m.y-y)})).filter(t=>t.d<120);
+            ts.sort((a,b)=>a.d-b.d);
+            let ks=ts.slice(0,Math.min(ts.length,7)).map(t=>t.idx).sort((a,b)=>b-a);
+            ks.forEach(idx=>{let m=mice[idx];particles.push({x:m.x,y:m.y,vx:0,vy:0,life:1,c:'#d63031'});mice.splice(idx,1);});
+        }
+        else if(currentTool==='gender'){
+             SoundFX.playSplash();
+             for(let k=0;k<15;k++)particles.push({x:x,y:y,vx:(Math.random()-0.5)*10,vy:(Math.random()-0.5)*10,life:1,c:'#a29bfe'});
+             // 擴大變性範圍
+             mice.forEach(m=>{
+                 if(Math.hypot(m.x-x,m.y-y)<100){
+                     if(m.matingTarget){m.matingTarget.matingTarget=null;m.matingTarget=null;}
+                     m.gender=m.gender==='M'?'F':'M';
+                 }
+             });
+        }
+    }
+
+    canvas.addEventListener('mousedown', handleInput);
+    canvas.addEventListener('touchstart', handleInput, {passive: false});
+
+    // Class Definitions helpers
+    class Smoke{constructor(x,y){this.x=x;this.y=y;this.life=300;this.r=60;}draw(){let a=Math.min(1,this.life/60)*0.4;ctx.fillStyle=`rgba(85,239,196,${a})`;ctx.beginPath();ctx.arc(this.x,this.y,this.r,0,Math.PI*2);ctx.fill();}}
+    class Lure{constructor(x,y){this.x=x;this.y=y;this.life=600;this.r=300;}draw(){let p=(Date.now()/500)%1;ctx.strokeStyle=`rgba(232,67,147,${1-p})`;ctx.lineWidth=3;ctx.beginPath();ctx.arc(this.x,this.y,this.r*p,0,Math.PI*2);ctx.stroke();ctx.fillStyle='#e84393';ctx.beginPath();ctx.arc(this.x,this.y,8,0,Math.PI*2);ctx.fill();ctx.fillStyle='#fff';ctx.font='10px Arial';ctx.fillText('💗',this.x-6,this.y+4);}}
+
+    initGame();
+</script>
+</body>
+</html>
